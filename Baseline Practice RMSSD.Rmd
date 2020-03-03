@@ -1,0 +1,189 @@
+---
+title: "HRV_Baseline"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+This is an R Markdown document for analyzing ECG data for the 2019 AAA L2 Automation study - BASELINE ONLY
+
+```{r, message = FALSE}
+library(tidyverse)
+library(stringr)
+library(data.table)
+library(readr)
+library(lme4)
+library(apaTables)
+```
+
+There are the main list objects for structuring the analyses.
+```{r}
+Function  = list()
+HRV       = list()
+Stat      = list()
+```
+
+This function reads in all the files and appends them to a single tibble.
+```{r}
+#fltr is the string that the file name must contain
+Function$combine_csv <- function(fPath, fltr=NULL, nskip=0, colnms = FALSE){
+  # List all files in the path
+  f <- list.files(path = fPath, recursive = TRUE)
+  
+  #separate files list and place into tibble
+  f_split <- as_tibble(str_split(f, "_|/", simplify = TRUE)) %>%
+    mutate(f = f)
+  
+  #filter list of files by 
+  if (!is.null(fltr)) {
+    f_split <- filter(f_split, str_detect(f_split$f, fltr))
+  }
+  
+  #add a column id to the front of the f_split data frame
+  f_split <- f_split %>%
+    mutate(.id = row_number()) %>%
+    select(".id", everything())   
+  
+  #read in all files to list
+  fls <- lapply(str_c(fPath, f_split$f), read_csv, skip=nskip, col_names = colnms)
+  
+  #convert list to data frame
+  d <- as.data.frame(rbindlist(fls, fill = TRUE, idcol = TRUE))
+  
+  #join data with identifying information
+  e <- f_split %>%
+    full_join(d, by = ".id")
+}
+```
+
+Call the combine_csv function, assigning the outut to HRV$raw
+```{r, message=FALSE, warning=FALSE}
+HRV$raw <- Function$combine_csv("~/Desktop/AAAFTS_2019_L2_Report-master/Data/EKG/RMSSD/", "rmssd.csv", nskip=3)
+```
+
+Separate conjoined columns, rename, etc. and move to new data frame.
+
+```{r, warning=FALSE}
+HRV$full <- HRV$raw %>%
+  separate(V1, c("Subject", "Vehicle Run", "RA", "Vehicle")) %>%
+  separate(V2, c("Interstate", "Condition", "Run Number")) %>%
+  rename(id = '.id',
+         baseline_or_drt = V3,
+         left_edge = X1,
+         right_edge = X2,
+         rmssd = X3,
+         sdsd = X4,
+         pnn50 = X5) %>%
+  select(-V4, -f) %>%
+  mutate(Vehicle = ifelse(str_detect(Vehicle, "V"), "v", Vehicle),
+         Vehicle = fct_recode(Vehicle, CT6 = "c", Rogue = "n", Model3 = "t", XC90 = "v"),
+         baseline_or_drt = ifelse(str_detect(baseline_or_drt, "b"), "b", baseline_or_drt),
+         baseline_or_drt = ifelse(str_detect(baseline_or_drt, "drt"), "DRT", "B"),
+         `Age Cohort` = ifelse(as.numeric(Subject) < 300, "Younger", "Older"))
+```
+
+Remove DRT data
+```{r}
+HRV$clean <- HRV$full %>% filter(baseline_or_drt != "DRT")
+```
+
+Plot unfiltered data at a subject level
+```{r fig.height=20, fig.width=7}
+ggplot(HRV$clean, aes(rmssd, Subject)) +
+  geom_point() 
+```
+
+Generate Z-scores at each condition.
+```{r}
+Stat$clean_nrow <- nrow(HRV$clean)
+
+HRV$clean <- HRV$clean %>%
+  group_by(Subject, Vehicle, Interstate, Condition) %>%
+  mutate(`Z Score` = (rmssd - mean(rmssd, na.rm=T))/sd(rmssd, na.rm=T)) %>%
+  arrange(`Age Cohort`, `Z Score`) %>%
+  mutate(`Rank Order` = row_number())
+```
+
+**Filter** removes outliers that 3 standard deviations from the mean.
+```{r}
+HRV$clean <- HRV$clean %>%  filter(`Z Score` < 3, `Z Score` > -3)
+Stat$new_size <- nrow(HRV$clean)
+Stat$removed <-  Stat$clean_nrow - Stat$new_size
+```
+
+Plot data at the subject level with the 3sd outliers removed
+```{r fig.height=20, fig.width=7}
+ggplot(HRV$clean, aes(rmssd, Subject)) +
+  geom_point() 
+```
+
+Original size = `r Stat$clean_nrow`
+
+New size      = `r Stat$new_size`
+
+Removed       = `r Stat$removed`
+
+Collapse data to the level of each drive and save to new .csv file.
+```{r}
+HRV$collapsed <- HRV$clean %>%
+  group_by(Subject, `Age Cohort`, Vehicle, Interstate, Condition) %>%
+  summarize(rmssd = mean(rmssd)) %>%
+  write_csv("~/Desktop/HRV.csv")
+```
+
+#######
+
+# Condition
+```{r}
+HRV[["collapsed"]] %>%
+  group_by(Subject, Condition) %>%
+  summarize(RMSSD = mean(rmssd)) %>%
+  
+  ggplot(aes(Condition, RMSSD)) +
+  geom_point() +
+  stat_summary(geom = "point", fun.y = "mean", col = "black", size = 3, shape = 24, fill = "red") +
+  theme_bw()
+
+a <- lmer(rmssd ~ 1         + (1|Subject), data = HRV[["collapsed"]], REML = FALSE)
+b <- lmer(rmssd ~ Condition + (1|Subject), data = HRV[["collapsed"]], REML = FALSE)
+anova(a, b)
+summary(b)
+```
+
+# Interstate
+```{r}
+HRV[["collapsed"]] %>%
+  group_by(Subject, Interstate) %>%
+  summarize(RMSSD = mean(rmssd)) %>%
+  
+  ggplot(aes(Interstate, RMSSD)) +
+  geom_point() +
+  stat_summary(geom = "point", fun.y = "mean", col = "black", size = 3, shape = 24, fill = "red") +
+  theme_bw()
+
+a <- lmer(rmssd ~ 1         + (1|Subject), data = HRV[["collapsed"]], REML = FALSE)
+b <- lmer(rmssd ~ Interstate + (1|Subject), data = HRV[["collapsed"]], REML = FALSE)
+anova(a, b)
+summary(b)
+```
+
+# Vehicle
+```{r}
+HRV[["collapsed"]] %>%
+  group_by(Subject, Vehicle) %>%
+  summarize(RMSSD = mean(rmssd)) %>%
+  
+  ggplot(aes(Vehicle, RMSSD)) +
+  geom_point() +
+  stat_summary(geom = "point", fun.y = "mean", col = "black", size = 3, shape = 24, fill = "red") +
+  theme_bw()
+
+a <- lmer(rmssd ~ 1         + (1|Subject), data = HRV[["collapsed"]], REML = FALSE)
+b <- lmer(rmssd ~ Vehicle + (1|Subject), data = HRV[["collapsed"]], REML = FALSE)
+anova(a, b)
+summary(b)
+```
